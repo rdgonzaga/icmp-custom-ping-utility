@@ -168,6 +168,8 @@ def sendOnePing(mySocket, destAddr, ID):
     # Both LISTS and TUPLES consist of a number of objects
     # which can be referenced by their position number within the object.
 
+    return sequence_number
+
 
 def doOnePing(destAddr, timeout):
     icmp = getprotobyname("icmp")
