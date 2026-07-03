@@ -6,8 +6,62 @@ import time
 import select
 import binascii
 
+ICMP_ECHO_REPLY = 0
 ICMP_ECHO_REQUEST = 8
+ICMP_DEST_UNREACHABLE = 3
+ICMP_TIME_EXCEEDED = 11
+
 sequence_number = 0
+
+# Source:
+# https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml#icmp-parameters-codes-11
+# https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml#icmp-parameters-codes-3
+ICMP_ERROR_CODES = {
+    ICMP_DEST_UNREACHABLE: {
+        0: "Destination Network Unreachable",
+        1: "Destination Host Unreachable",
+        2: "Destination Protocol Unreachable",
+        3: "Destination Port Unreachable",
+        4: "Fragmentation Needed and DF Set",
+        5: "Source Route Failed",
+        6: "Destination Network Unknown",
+        7: "Destination Host Unknown",
+        9: "Destination Network Administratively Prohibited",
+        10: "Destination Host Administratively Prohibited",
+        13: "Communication Administratively Prohibited",
+    },
+    ICMP_TIME_EXCEEDED: {
+        0: "TTL Expired in Transit",
+        1: "Fragment Reassembly Time Exceeded",
+    },
+}
+
+def getICMPErrorMessage(icmpType, code):
+    if icmpType in ICMP_ERROR_CODES:
+        return ICMP_ERROR_CODES[icmpType].get(code, "Unknown ICMP error")
+    return "Unknown ICMP error"
+
+# Error packets include the original IP header + the first 8 bytes of the original packet.
+# This lets us check if the error comes from one of our Echo Requests by checking the ID field in the original packet.
+def originalPacketMatchesID(recPacket, icmpStart, ID):
+    originalIPStart = icmpStart + 8
+
+    if len(recPacket) < originalIPStart + 20:
+        return False, None
+    
+    originalIPHeaderLength = (recPacket[originalIPStart] & 0x0F) * 4
+    originalICMPStart = originalIPStart + originalIPHeaderLength
+
+    if len(recPacket) < originalICMPStart + 8:
+        return False, None
+    
+    originalICMPHeader = recPacket[originalICMPStart:originalICMPStart + 8]
+    originalType, _originalCode, _originalChecksum, originalID, originalSequence = struct.unpack("bbHHh", originalICMPHeader)
+
+    if originalType == ICMP_ECHO_REQUEST and originalID == ID:
+        return True, originalSequence
+    
+    return False, None
 
 def checksum(string):
     csum = 0
@@ -42,19 +96,42 @@ def receiveOnePing(mySocket, ID, timeout, destAddr):
         recPacket, addr = mySocket.recvfrom(1024)
         
         #Fill in start
-        icmpHeader = recPacket[20:28]
+        # refactored # added to avoid assuming header always starts at byte 20, a little unnecessary but no harm being safe.
+        ipHeaderLength = (recPacket[0] & 0x0F) * 4
+        icmpHeader = recPacket[ipHeaderLength:ipHeaderLength + 8]
         type, code, checksum, packetID, sequence = struct.unpack("bbHHh", icmpHeader)
 
         #Fetch the ICMP header from the IP packet
-        if packetID == ID:
-            timeData = recPacket[28:]
+        if packetID == ID and type == ICMP_ECHO_REPLY:
+            timeData = recPacket[ipHeaderLength + 8:ipHeaderLength + 16] # safety
             timeSent = struct.unpack("d", timeData)[0]
-            return "Reply from %s: seq=%d time=%.3f ms" % (destAddr, sequence, (timeReceived - timeSent) * 1000)
+            rtt = (timeReceived - timeSent) * 1000
+
+            return {
+                "message": "Reply from %s: seq=%d time=%.3f ms" % (addr[0], sequence, rtt),
+                "rtt": rtt
+            }
+
         #Fill in end
+
+        # BONUS: ICMP error response
+        if type in ICMP_ERROR_CODES:
+            matchesID, originalSequence = originalPacketMatchesID(recPacket, ipHeaderLength, ID)
+
+            if matchesID:
+                errorMessage = getICMPErrorMessage(type, code)
+                return {
+                    "message": "ICMP error from %s: seq=%d %s (type=%d, code=%d)" %
+                               (addr[0], originalSequence, errorMessage, type, code),
+                    "rtt": None
+                }
         
         timeLeft = timeLeft - howLongInSelect
         if timeLeft <= 0:
-            return "Request timed out."
+            return {
+                "message": "Request timed out.",
+                "rtt": None
+            }
 
 def sendOnePing(mySocket, destAddr, ID):
     
@@ -108,20 +185,53 @@ def doOnePing(destAddr, timeout):
     
     return delay
     
-    
-def ping(host, timeout=2): # specs 5 Assume the packet is lost if no reply is received within 2000 ms.
+def printSummary(host, packetsSent, packetsReceived, rtts):
+    packetsLost = packetsSent - packetsReceived
+    packetLossRate = (packetsLost / packetsSent) * 100 if packetsSent > 0 else 0
+
+    print("")
+    print("--- %s ping statistics ---" % host)
+    print("%d packets transmitted, %d received, %.1f%% packet loss" %
+          (packetsSent, packetsReceived, packetLossRate))
+
+    if rtts:
+        minRTT = min(rtts)
+        maxRTT = max(rtts)
+        avgRTT = sum(rtts) / len(rtts)
+        print("rtt min/avg/max = %.3f / %.3f / %.3f ms" % (minRTT, avgRTT, maxRTT))
+    else:
+        print("rtt min/avg/max = N/A")
+
+def ping(host, timeout=2, count=4): # specs 5 Assume the packet is lost if no reply is received within 2000 ms.
     # timeout=1 means: If one second goes by without a reply from the server,
     # the client assumes that either the client's ping or the server's pong is lost
     
     dest = gethostbyname(host)
     print("Pinging " + dest + " using Python:")
     print("")
-    
-    # Send ping requests to a server separated by approximately one second
-    while 1 :
-        delay = doOnePing(dest, timeout)
-        print(delay)
-        time.sleep(1)# one second
-    return delay
 
-ping("127.0.0.1")
+    packetsSent = 0
+    packetsRcvd = 0
+    rtts = []
+
+    try:
+        while count is None or packetsSent < count:
+            result = doOnePing(dest, timeout)
+            packetsSent += 1
+            print(result["message"])
+
+            if result["rtt"] is not None:
+                packetsRcvd += 1
+                rtts.append(result["rtt"])
+
+            if count is None or packetsSent < count:
+                time.sleep(1) # one second
+    except KeyboardInterrupt:
+        # Lets stats print even if pinging is stopped
+        pass
+    
+    printSummary(host, packetsSent, packetsRcvd, rtts)
+    return rtts
+
+if __name__ == "__main__":
+    ping("127.0.0.1")
