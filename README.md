@@ -14,8 +14,7 @@ py ICMP.py [host] [-c COUNT] [-t TIMEOUT]
 ## Sample Output
 
 ```text
-Pinging google.com [142.250.197.110] with 8 bytes of data:
-Count: 4 | Timeout: 2.0 seconds
+Pinging 142.250.199.206 using Python:
 
 Reply from 142.250.197.110: seq=1 time=29.206 ms
 Reply from 142.250.197.110: seq=2 time=27.928 ms
