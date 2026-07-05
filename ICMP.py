@@ -219,20 +219,8 @@ def ping(host, timeout=2, count=4): # specs 5 Assume the packet is lost if no re
     # timeout=1 means: If one second goes by without a reply from the server,
     # the client assumes that either the client's ping or the server's pong is lost
     
-    try:
-        dest = gethostbyname(host)
-    except gaierror:
-        print("Could not resolve host: %s" % host)
-        return []
-
-    dataSize = struct.calcsize("d")
-    countDisplay = "continuous" if count is None else str(count)
-
-    if host == dest:
-        print("Pinging %s with %d bytes of data:" % (dest, dataSize))
-    else:
-        print("Pinging %s [%s] with %d bytes of data:" % (host, dest, dataSize))
-    print("Count: %s | Timeout: %.1f seconds" % (countDisplay, timeout))
+    dest = gethostbyname(host)
+    print("Pinging " + dest + " using Python:")
     print("")
 
     packetsSent = 0
